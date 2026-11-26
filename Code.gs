@@ -15,8 +15,15 @@ function jsonOut_(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// ใช้เฉพาะเมื่อต้องแตะ Google Sheets จริง ๆ เท่านั้น ไม่เรียกตอนลงทะเบียน/ล็อกอิน
+function touchSheetIfConfigured_() {
+  if (!SHEET_ID) return;
+  try {
+    SpreadsheetApp.openById(SHEET_ID);
+  } catch (e) {}
+}
+
 function getDb_() {
-  var ss = SpreadsheetApp.openById(SHEET_ID);
   var props = PropertiesService.getScriptProperties();
   var raw = props.getProperty('THAISIM_DB_V2');
   var db;
@@ -24,6 +31,7 @@ function getDb_() {
     db = JSON.parse(raw);
   } else {
     var defaultIncId = 'inc-default';
+    var nowIso = new Date().toISOString();
     db = {
       staff: [
         {
@@ -43,8 +51,8 @@ function getDb_() {
         {
           id: defaultIncId,
           name: 'ฝึกซ้อมอุบัติภัยหมู่ (MCI Drill)',
-          createdAt: new Date().toISOString(),
-          openedAt: new Date().toISOString(),
+          createdAt: nowIso,
+          openedAt: nowIso,
           closedAt: null,
           status: 'open'
         }
@@ -57,12 +65,12 @@ function getDb_() {
     db.patientsByIncident[defaultIncId] = [];
     db.historyByIncident[defaultIncId] = [];
     db.stockByIncident[defaultIncId] = DEFAULT_STOCK.map(function(x) {
-      return Object.assign({}, x, { updatedAt: new Date().toISOString(), staff: 'System' });
+      return Object.assign({}, x, { updatedAt: nowIso, staff: 'System' });
     });
     db.movementsByIncident[defaultIncId] = [];
     props.setProperty('THAISIM_DB_V2', JSON.stringify(db));
   }
-  return { ss: ss, props: props, db: db };
+  return { props: props, db: db };
 }
 
 function saveDb_(props, db) {
@@ -73,8 +81,9 @@ function ensureIncidentBuckets_(db, incId) {
   if (!db.patientsByIncident[incId]) db.patientsByIncident[incId] = [];
   if (!db.historyByIncident[incId]) db.historyByIncident[incId] = [];
   if (!db.stockByIncident[incId]) {
+    var nowIso = new Date().toISOString();
     db.stockByIncident[incId] = DEFAULT_STOCK.map(function(x) {
-      return Object.assign({}, x, { updatedAt: new Date().toISOString(), staff: 'System' });
+      return Object.assign({}, x, { updatedAt: nowIso, staff: 'System' });
     });
   }
   if (!db.movementsByIncident[incId]) db.movementsByIncident[incId] = [];
@@ -228,7 +237,7 @@ function doGet(e) {
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  lock.waitLock(5000);
   try {
     var ctx = getDb_();
     var db = ctx.db;
@@ -296,12 +305,13 @@ function doPost(e) {
     }
 
     if (route === '/api/incidents') {
+      var nowIsoInc = new Date().toISOString();
       var newId = 'inc-' + Date.now();
       var newInc = {
         id: newId,
         name: String(payload.name || '').trim(),
-        createdAt: new Date().toISOString(),
-        openedAt: new Date().toISOString(),
+        createdAt: nowIsoInc,
+        openedAt: nowIsoInc,
         closedAt: null,
         status: 'open'
       };
@@ -362,7 +372,6 @@ function doPost(e) {
         return jsonOut_({ error: 'Data stale / version conflict' });
       }
 
-      // ตัดสต็อกเวชภัณฑ์ตาม stockUsage
       (payload.stockUsage || []).forEach(function(u) {
         var qtyUsed = Number(u.quantity || 0);
         if (qtyUsed <= 0) return;
@@ -442,8 +451,9 @@ function doPost(e) {
     }
 
     if (route === '/api/stock/reset') {
+      var nowReset = new Date().toISOString();
       db.stockByIncident[incId] = DEFAULT_STOCK.map(function(x) {
-        return Object.assign({}, x, { updatedAt: new Date().toISOString(), staff: staff ? staff.name : 'System' });
+        return Object.assign({}, x, { updatedAt: nowReset, staff: staff ? staff.name : 'System' });
       });
       saveDb_(ctx.props, db);
       return jsonOut_({ stock: db.stockByIncident[incId] });
