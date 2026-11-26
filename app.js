@@ -1329,14 +1329,26 @@ async function register(event) {
     return;
   }
   body.personnelCode = body.personnelCode?.trim() || '000';
+  const submitBtn = $('#registerForm button[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
+  showError(error, '');
   try {
     const result = await api('/api/register', { method: 'POST', body });
     if (result.token) setToken(result.token);
-    state.session = result.staff;
-    enterApp();
-    notify(`ลงทะเบียนสำเร็จ ชื่อผู้ใช้: ${result.username}`);
+    state.session = result.staff || {
+      id: `st-${Date.now()}`,
+      username: result.username || '',
+      name: body.name.trim(),
+      org: body.org.trim(),
+      duty: body.duty.trim(),
+      opZone: body.opZone.trim(),
+    };
+    await enterApp();
+    notify(`ลงทะเบียนสำเร็จ ชื่อผู้ใช้: ${state.session.username}`);
   } catch (e) {
     showError(error, e.message);
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
@@ -1380,7 +1392,7 @@ async function enterApp() {
     else if (intakePage) navigate('cards');
     startLiveUpdates();
     clearInterval(state.presenceTimer);
-    state.presenceTimer = setInterval(sendPresence, 30_000);
+    state.presenceTimer = setInterval(sendPresence, 60_000);
   } catch (error) {
     notify(error.message, 'error');
   }
