@@ -1,200 +1,377 @@
-/** ThaiSIM MCI Tracking — Code.gs (Google Apps Script, V8) */
-const SHEET_ID = '10YRiiAJrXIiCCYDQYmnv6cl01fPEyCIpUphBvIhNgIE';
-
-const TABS = {
-  Patients: ['ID', 'Color', 'Zone', 'TriagePoint', 'DeconStatus', 'Demo', 'CC', 'RR', 'HR', 'BP', 'SpO2', 'GCS', 'Interventions', 'Transport', 'Staff', 'Duty', 'Org', 'Updated'],
-  Timeline: ['Time', 'PatientID', 'Color', 'Zone', 'TriagePoint', 'DeconStatus', 'RR', 'HR', 'BP', 'SpO2', 'GCS', 'Note', 'Staff', 'Duty', 'Org'],
-  Stock: ['ID', 'Name', 'Category', 'Qty', 'Unit', 'MinAlert', 'Updated', 'Staff'],
-  Staff: ['Time', 'Code', 'Duty', 'Org', 'Key', 'Name', 'Zone']
+var SHEET_ID = '10YRiiAJrXIiCCYDQYmnv6cl01fPEyCIpUphBvIhNgIE';
+var SHEET_NAMES = {
+  PATIENTS: 'Patients',
+  TIMELINE: 'Timeline',
+  STOCK: 'Stock',
+  STAFF: 'Staff'
 };
-const P_KEYS = ['id', 'color', 'zone', 'triagePoint', 'deconStatus', 'demo', 'cc', 'rr', 'hr', 'bp', 'spo2', 'gcs', 'interventions', 'transport', 'staff', 'duty', 'org', 'updated'];
-const T_KEYS = ['time', 'id', 'color', 'zone', 'triagePoint', 'deconStatus', 'rr', 'hr', 'bp', 'spo2', 'gcs', 'note', 'staff', 'duty', 'org'];
-const DEFAULT_STOCK = [
-  ['STK-01', 'Oxygen Tank + Mask', 'Airway', 20, 'ถัง', 5],
-  ['STK-02', 'IV Set + 0.9% NSS', 'Circulation', 50, 'ชุด', 10],
-  ['STK-03', 'Tourniquet / Gauze', 'Bleeding', 30, 'ชุด', 8],
-  ['STK-04', 'Decon Wash Kit', 'Decontamination', 25, 'ชุด', 6],
-  ['STK-05', 'C-Collar / Spine Board', 'Immobilization', 12, 'ชุด', 3],
-  ['STK-06', 'Cold Pack / Dressing', 'General', 40, 'ชิ้น', 10]
+
+var DEFAULT_STOCK = [
+  ['STK-01', 'Oxygen Tank + Mask', 'Airway', 20, 'ถัง', 5, '-', 'System'],
+  ['STK-02', 'IV Set + 0.9% NSS', 'Circulation', 50, 'ชุด', 10, '-', 'System'],
+  ['STK-03', 'Tourniquet / Gauze', 'Bleeding', 30, 'ชุด', 8, '-', 'System'],
+  ['STK-04', 'Decon Wash Kit', 'Decontamination', 25, 'ชุด', 6, '-', 'System'],
+  ['STK-05', 'C-Collar / Spine Board', 'Immobilization', 12, 'ชุด', 3, '-', 'System'],
+  ['STK-06', 'Cold Pack / Dressing', 'General', 40, 'ชิ้น', 10, '-', 'System']
 ];
 
-/* ---------- Web app entry ---------- */
-function doGet(e) {
-  const t = HtmlService.createTemplateFromFile('index');
-  t.webAppUrl = ScriptApp.getService().getUrl() || '';
-  t.initId = String((e && e.parameter && e.parameter.id) || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-  return t.evaluate()
-    .setTitle('ThaiSIM MCI Tracking')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-}
-
-/* ---------- Helpers ---------- */
-const TZ = 'Asia/Bangkok';
-const now_ = () => Utilities.formatDate(new Date(), TZ, 'dd/MM/yyyy HH:mm:ss');
-const str_ = v => v == null ? '' : v instanceof Date ? Utilities.formatDate(v, TZ, 'dd/MM/yyyy HH:mm:ss') : String(v);
-const same_ = (a, b) => str_(a).trim().toUpperCase() === b;
-
-function db_() {
-  try { const a = SpreadsheetApp.getActiveSpreadsheet(); if (a) return a; } catch (e) {}
+function getSpreadsheet_() {
+  try {
+    var active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) return active;
+  } catch (e) {}
   return SpreadsheetApp.openById(SHEET_ID);
 }
 
-function sheet_(name) {
-  const ss = db_();
-  let sh = ss.getSheetByName(name);
+function doGet(e) {
+  var template = HtmlService.createTemplateFromFile('index');
+  var url = '';
+  try {
+    url = ScriptApp.getService().getUrl() || '';
+  } catch (err) {}
+  template.webAppUrl = url;
+  template.initId = (e && e.parameter && e.parameter.id) ? String(e.parameter.id).trim().toUpperCase() : '';
+  
+  return template.evaluate()
+    .setTitle('ThaiSIM MCI Tracking')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no');
+}
+
+function nowThai() {
+  return Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm:ss');
+}
+
+function getOrCreateSheet_(ss, name, headers) {
+  var sh = ss.getSheetByName(name);
   if (!sh) sh = ss.insertSheet(name);
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(TABS[name]);
+  if (sh.getLastRow() === 0 && headers && headers.length) {
+    sh.appendRow(headers);
+    sh.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#f1f5f9');
     sh.setFrozenRows(1);
-    sh.getRange(1, 1, 1, TABS[name].length).setFontWeight('bold');
-    if (name === 'Stock') {
-      const ts = now_();
-      sh.getRange(2, 1, DEFAULT_STOCK.length, 8).setValues(DEFAULT_STOCK.map(s => [...s, ts, 'System']));
-    }
   }
   return sh;
 }
 
-function rows_(name) {
-  const sh = sheet_(name), n = sh.getLastRow() - 1;
-  return n > 0 ? sh.getRange(2, 1, n, TABS[name].length).getValues() : [];
+function ensureSheetsStructure_() {
+  var ss = getSpreadsheet_();
+  var pSh = getOrCreateSheet_(ss, SHEET_NAMES.PATIENTS, [
+    'ID', 'Color', 'Zone', 'TriagePoint', 'DeconStatus',
+    'Demo', 'CC', 'RR', 'HR', 'BP', 'SpO2', 'GCS',
+    'Interventions', 'Transport', 'Staff', 'Duty', 'Org', 'Updated'
+  ]);
+  var tSh = getOrCreateSheet_(ss, SHEET_NAMES.TIMELINE, [
+    'Time', 'PatientID', 'Color', 'Zone', 'TriagePoint', 'DeconStatus',
+    'RR', 'HR', 'BP', 'SpO2', 'GCS', 'Note', 'Staff', 'Duty', 'Org'
+  ]);
+  var sSh = getOrCreateSheet_(ss, SHEET_NAMES.STOCK, [
+    'ID', 'Name', 'Category', 'Qty', 'Unit', 'MinAlert', 'Updated', 'Staff'
+  ]);
+  if (sSh.getLastRow() <= 1) {
+    var ts = nowThai();
+    for (var i = 0; i < DEFAULT_STOCK.length; i++) {
+      var item = DEFAULT_STOCK[i];
+      sSh.appendRow([item[0], item[1], item[2], item[3], item[4], item[5], ts, item[6]]);
+    }
+  }
+  var stSh = getOrCreateSheet_(ss, SHEET_NAMES.STAFF, [
+    'Time', 'Name', 'Duty', 'Org', 'Key'
+  ]);
+  return { ss: ss, pSh: pSh, tSh: tSh, sSh: sSh, stSh: stSh };
 }
 
-const obj_ = (keys, row) => keys.reduce((o, k, i) => (o[k] = str_(row[i]), o), {});
-
-// text=true stores everything as plain text, so values like "90/60" are never turned into dates
-function put_(sh, rowNo, vals, text) {
-  const r = sh.getRange(rowNo, 1, 1, vals.length);
-  if (text) r.setNumberFormat('@');
-  r.setValues([vals]);
-}
-
-function locked_(fn) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try { return fn(); } finally { lock.releaseLock(); }
-}
-
-function who_(d) {
-  const org = [d.org, d.opZone].filter(Boolean).join(' · ');
-  return { org: org, label: [d.staff || 'Staff', d.duty, org].filter(Boolean).join(' · ') };
-}
-
-/* ---------- Read ---------- */
 function getAllData() {
-  const patients = rows_('Patients').filter(r => r[0]).map(r => obj_(P_KEYS, r));
-  const stock = rows_('Stock').filter(r => r[0]).map(r => ({
-    id: str_(r[0]), name: str_(r[1]), category: str_(r[2]), qty: Number(r[3]) || 0,
-    unit: str_(r[4]), minAlert: Number(r[5]) || 0, updated: str_(r[6]), staff: str_(r[7])
-  }));
-  const seen = {}, staff = [];
-  rows_('Staff').forEach(r => {
-    const code = str_(r[1]).trim(), key = (str_(r[4]) || code).trim().toLowerCase();
-    if (!key || seen[key]) return;
-    seen[key] = true;
-    staff.push({ code: code, name: str_(r[5]), duty: str_(r[2]), org: str_(r[3]), zone: str_(r[6]), time: str_(r[0]) });
-  });
-  return { ok: true, patients: patients, stock: stock, staff: staff, staffCount: staff.length };
+  var sheets = ensureSheetsStructure_();
+  var pSh = sheets.pSh, sSh = sheets.sSh, stSh = sheets.stSh;
+  
+  var patients = [];
+  if (pSh.getLastRow() > 1) {
+    var rows = pSh.getRange(2, 1, pSh.getLastRow() - 1, 18).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (!r[0]) continue;
+      patients.push({
+        id: String(r[0]), color: String(r[1] || ''), zone: String(r[2] || ''),
+        triagePoint: String(r[3] || ''), deconStatus: String(r[4] || ''), demo: String(r[5] || ''),
+        cc: String(r[6] || ''), rr: String(r[7] || ''), hr: String(r[8] || ''), bp: String(r[9] || ''),
+        spo2: String(r[10] || ''), gcs: String(r[11] || ''), interventions: String(r[12] || ''),
+        transport: String(r[13] || ''), staff: String(r[14] || ''), duty: String(r[15] || ''),
+        org: String(r[16] || ''), updated: String(r[17] || '')
+      });
+    }
+  }
+
+  var stock = [];
+  if (sSh.getLastRow() > 1) {
+    var sRows = sSh.getRange(2, 1, sSh.getLastRow() - 1, 8).getValues();
+    for (var j = 0; j < sRows.length; j++) {
+      var sr = sRows[j];
+      if (!sr[0]) continue;
+      stock.push({
+        id: String(sr[0]), name: String(sr[1] || ''), category: String(sr[2] || ''),
+        qty: Number(sr[3] || 0), unit: String(sr[4] || ''), minAlert: Number(sr[5] || 0),
+        updated: String(sr[6] || ''), staff: String(sr[7] || '')
+      });
+    }
+  }
+
+  var staffList = [];
+  var seenKeys = {};
+  if (stSh.getLastRow() > 1) {
+    var stRows = stSh.getRange(2, 1, stSh.getLastRow() - 1, 5).getValues();
+    for (var k = 0; k < stRows.length; k++) {
+      var str = stRows[k];
+      var code = String(str[1] || '').trim();
+      var key = String(str[4] || code).trim().toLowerCase();
+      if (!code && !key) continue;
+      if (seenKeys[key]) continue;
+      seenKeys[key] = true;
+      staffList.push({
+        time: String(str[0] || ''), name: code, code: code,
+        duty: String(str[2] || ''), org: String(str[3] || ''), key: String(str[4] || code)
+      });
+    }
+  }
+
+  return { ok: true, patients: patients, stock: stock, staffCount: staffList.length, staffList: staffList };
 }
 
 function getPatientData(pid) {
-  const id = str_(pid).trim().toUpperCase();
-  const row = rows_('Patients').find(r => same_(r[0], id));
-  const logs = rows_('Timeline').filter(r => same_(r[1], id)).reverse().map(r => obj_(T_KEYS, r));
-  return { ok: true, patient: row ? obj_(P_KEYS, row) : null, logs: logs };
-}
+  var sheets = ensureSheetsStructure_();
+  var pSh = sheets.pSh, tSh = sheets.tSh;
+  var target = String(pid || '').trim().toUpperCase();
+  var patient = null;
 
-/* ---------- Write ---------- */
-function savePatient(d) {
-  const id = str_(d.id).trim().toUpperCase();
-  if (!id) return { ok: false, error: 'กรุณากรอกรหัสผู้ป่วย' };
-  return locked_(() => {
-    const pSh = sheet_('Patients'), tSh = sheet_('Timeline'), ts = now_(), w = who_(d);
-    const g = k => str_(d[k]).trim();
-    const row = [id, g('color'), g('zone'), g('triagePoint'), g('deconStatus'), g('demo'), g('cc'),
-      g('rr'), g('hr'), g('bp'), g('spo2'), g('gcs'), g('interventions'), g('transport'),
-      w.label, g('duty'), w.org, ts];
-    const at = rows_('Patients').findIndex(r => same_(r[0], id));
-    put_(pSh, at > -1 ? at + 2 : pSh.getLastRow() + 1, row, true);
-    put_(tSh, tSh.getLastRow() + 1, [ts, id, g('color'), g('zone'), g('triagePoint'), g('deconStatus'),
-      g('rr'), g('hr'), g('bp'), g('spo2'), g('gcs'), g('note'), w.label, g('duty'), w.org], true);
-    return { ok: true, id: id, all: getAllData() };
-  });
-}
-
-const normCode_ = s => str_(s).replace(/\s+/g, '').toLowerCase();
-
-// One-time registration: code, real first name, hospital, duty, work zone
-function createStaff(info) {
-  info = info || {};
-  const code = str_(info.code).replace(/\s+/g, ''), key = normCode_(code);
-  const name = str_(info.name).trim(), org = str_(info.org).trim(), duty = str_(info.duty).trim(), zone = str_(info.zone).trim();
-  if (!key || !name || !org || !duty || !zone) return { ok: false, error: 'กรอกข้อมูลให้ครบทุกช่อง' };
-  return locked_(() => {
-    const sh = sheet_('Staff');
-    if (rows_('Staff').some(r => normCode_(r[1]) === key || normCode_(r[4]) === key)) {
-      return { ok: false, error: 'รหัสบุคลากรนี้ลงทะเบียนแล้ว — กลับไปเข้าสู่ระบบได้เลย' };
+  if (pSh.getLastRow() > 1) {
+    var rows = pSh.getRange(2, 1, pSh.getLastRow() - 1, 18).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]).trim().toUpperCase() === target) {
+        var r = rows[i];
+        patient = {
+          id: String(r[0]), color: String(r[1] || ''), zone: String(r[2] || ''),
+          triagePoint: String(r[3] || ''), deconStatus: String(r[4] || ''), demo: String(r[5] || ''),
+          cc: String(r[6] || ''), rr: String(r[7] || ''), hr: String(r[8] || ''), bp: String(r[9] || ''),
+          spo2: String(r[10] || ''), gcs: String(r[11] || ''), interventions: String(r[12] || ''),
+          transport: String(r[13] || ''), staff: String(r[14] || ''), duty: String(r[15] || ''),
+          org: String(r[16] || ''), updated: String(r[17] || '')
+        };
+        break;
+      }
     }
-    sh.getRange(1, 1, 1, TABS.Staff.length).setValues([TABS.Staff]);
-    put_(sh, sh.getLastRow() + 1, [now_(), code, duty, org, key, name, zone], true);
-    return { ok: true, staff: { code: code, name: name, org: org, duty: duty, zone: zone } };
-  });
+  }
+
+  var logs = [];
+  if (tSh.getLastRow() > 1) {
+    var tRows = tSh.getRange(2, 1, tSh.getLastRow() - 1, 15).getValues();
+    for (var j = tRows.length - 1; j >= 0; j--) {
+      if (String(tRows[j][1]).trim().toUpperCase() === target) {
+        var tr = tRows[j];
+        logs.push({
+          time: String(tr[0] || ''), color: String(tr[2] || ''), zone: String(tr[3] || ''),
+          triagePoint: String(tr[4] || ''), deconStatus: String(tr[5] || ''), rr: String(tr[6] || ''),
+          hr: String(tr[7] || ''), bp: String(tr[8] || ''), spo2: String(tr[9] || ''),
+          gcs: String(tr[10] || ''), note: String(tr[11] || ''), staff: String(tr[12] || ''),
+          duty: String(tr[13] || ''), org: String(tr[14] || '')
+        });
+      }
+    }
+  }
+
+  return { ok: true, patient: patient, logs: logs };
 }
 
-// Login lookup by personnel code
-function findStaff(code) {
-  const k = normCode_(code);
-  if (!k) return { ok: true, staff: null };
-  const r = rows_('Staff').find(x => normCode_(x[1]) === k || normCode_(x[4]) === k);
-  if (!r) return { ok: true, staff: null };
-  const legacy = str_(r[3]).split(' · '); // rows from the old version stored "org · zone" together
-  return { ok: true, staff: { code: str_(r[1]), name: str_(r[5]) || str_(r[1]), duty: str_(r[2]), org: legacy[0] || '-', zone: str_(r[6]) || legacy[1] || '' } };
+function savePatient(d) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheets = ensureSheetsStructure_();
+    var pSh = sheets.pSh, tSh = sheets.tSh;
+    var pid = String(d.id || '').trim().toUpperCase();
+    if (!pid) return { ok: false, error: 'Missing Patient ID' };
+    var ts = nowThai();
+    
+    var orgArr = [];
+    if (d.org) orgArr.push(d.org);
+    if (d.opZone || d.zone) orgArr.push(d.opZone || d.zone);
+    var orgWithZone = orgArr.join(' · ');
+    
+    var staffArr = [];
+    if (d.staff) staffArr.push(d.staff);
+    if (d.duty) staffArr.push(d.duty);
+    if (orgWithZone) staffArr.push(orgWithZone);
+    var staffLabel = staffArr.join(' · ');
+
+    var rowData = [
+      pid, d.color || '', d.zone || '', d.triagePoint || '', d.deconStatus || '',
+      d.demo || '', d.cc || '', d.rr || '', d.hr || '', d.bp || '',
+      d.spo2 || '', d.gcs || '', d.interventions || '', d.transport || '',
+      staffLabel, d.duty || '', orgWithZone, ts
+    ];
+
+    var foundRow = -1;
+    if (pSh.getLastRow() > 1) {
+      var ids = pSh.getRange(2, 1, pSh.getLastRow() - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) {
+        if (String(ids[i][0]).trim().toUpperCase() === pid) {
+          foundRow = i + 2;
+          break;
+        }
+      }
+    }
+
+    if (foundRow > -1) {
+      pSh.getRange(foundRow, 1, 1, rowData.length).setValues([rowData]);
+    } else {
+      pSh.appendRow(rowData);
+    }
+
+    tSh.appendRow([
+      ts, pid, d.color || '', d.zone || '', d.triagePoint || '', d.deconStatus || '',
+      d.rr || '', d.hr || '', d.bp || '', d.spo2 || '', d.gcs || '',
+      d.note || '', staffLabel, d.duty || '', orgWithZone
+    ]);
+
+    return { ok: true, data: getPatientData(pid), all: getAllData() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function registerStaff(info) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheets = ensureSheetsStructure_();
+    var stSh = sheets.stSh;
+    var code = String((info && (info.code || info.staffCode || info.name)) || '').trim();
+    var duty = String((info && (info.duty || info.role)) || '').trim();
+    var org = String((info && (info.org || info.team)) || '').trim();
+    var opZone = String((info && (info.opZone || info.zone)) || '').trim();
+    
+    var orgLabelArr = [];
+    if (org) orgLabelArr.push(org);
+    if (opZone) orgLabelArr.push(opZone);
+    var orgLabel = orgLabelArr.join(' · ');
+    
+    var key = String((info && info.key) || code).trim().toLowerCase();
+    var ts = nowThai();
+    if (!key) return { ok: false, all: getAllData() };
+
+    var matchedRow = -1;
+    if (stSh.getLastRow() > 1) {
+      var rows = stSh.getRange(2, 1, stSh.getLastRow() - 1, 5).getValues();
+      for (var i = 0; i < rows.length; i++) {
+        var existingCode = String(rows[i][1] || '').trim().toLowerCase();
+        var existingKey = String(rows[i][4] || '').trim().toLowerCase();
+        if (existingKey === key || existingCode === key) {
+          matchedRow = i + 2;
+          break;
+        }
+      }
+    }
+
+    if (matchedRow > -1) {
+      stSh.getRange(matchedRow, 1, 1, 5).setValues([[ts, code, duty, orgLabel, key]]);
+    } else {
+      stSh.appendRow([ts, code, duty, orgLabel, key]);
+    }
+
+    return { ok: true, all: getAllData() };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function updateStock(req) {
-  return locked_(() => {
-    const sh = sheet_('Stock'), id = str_(req.id).trim();
-    const at = rows_('Stock').findIndex(r => str_(r[0]).trim() === id);
-    if (at < 0) return { ok: false };
-    const qty = Math.max(0, (Number(sh.getRange(at + 2, 4).getValue()) || 0) + (Number(req.delta) || 0));
-    const ts = now_();
-    sh.getRange(at + 2, 4).setValue(qty);
-    sh.getRange(at + 2, 7, 1, 2).setValues([[ts, who_(req).label]]);
-    return { ok: true, qty: qty, updated: ts };
-  });
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheets = ensureSheetsStructure_();
+    var sSh = sheets.sSh;
+    var id = String((req && req.id) || '').trim();
+    var delta = Number((req && req.delta) || 0);
+    var ts = nowThai();
+    
+    var orgLabelArr = [];
+    if (req && req.org) orgLabelArr.push(req.org);
+    if (req && req.opZone) orgLabelArr.push(req.opZone);
+    var orgLabel = orgLabelArr.join(' · ');
+    
+    var staffLabelArr = [];
+    if (req && req.staff) staffLabelArr.push(req.staff);
+    else staffLabelArr.push('Staff');
+    if (req && req.duty) staffLabelArr.push(req.duty);
+    if (orgLabel) staffLabelArr.push(orgLabel);
+    var staffLabel = staffLabelArr.join(' · ');
+
+    if (sSh.getLastRow() > 1) {
+      var rows = sSh.getRange(2, 1, sSh.getLastRow() - 1, 8).getValues();
+      for (var i = 0; i < rows.length; i++) {
+        if (String(rows[i][0]).trim() === id) {
+          var nextQty = Math.max(0, Number(rows[i][3] || 0) + delta);
+          sSh.getRange(i + 2, 4).setValue(nextQty);
+          sSh.getRange(i + 2, 7).setValue(ts);
+          sSh.getRange(i + 2, 8).setValue(staffLabel);
+          return { ok: true, qty: nextQty, updated: ts };
+        }
+      }
+    }
+    return { ok: false };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function addStockItem(item) {
-  const name = str_(item.name).trim();
-  if (!name) return { ok: false, error: 'กรุณากรอกชื่อรายการ' };
-  return locked_(() => {
-    const sh = sheet_('Stock');
-    const max = rows_('Stock').reduce((m, r) => Math.max(m, parseInt(str_(r[0]).replace(/\D/g, ''), 10) || 0), 0);
-    put_(sh, sh.getLastRow() + 1, ['STK-' + String(max + 1).padStart(2, '0'), name, item.category || 'General',
-      Number(item.qty) || 0, item.unit || 'ชิ้น', Number(item.minAlert) || 0, now_(), who_(item).label], false);
-    return { ok: true, all: getAllData() };
-  });
-}
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheets = ensureSheetsStructure_();
+    var sSh = sheets.sSh;
+    var nextNum = Math.max(1, sSh.getLastRow());
+    var newId = 'STK-' + String(nextNum).padStart(2, '0');
+    var ts = nowThai();
+    
+    var orgLabelArr = [];
+    if (item.org) orgLabelArr.push(item.org);
+    if (item.opZone) orgLabelArr.push(item.opZone);
+    var orgLabel = orgLabelArr.join(' · ');
+    
+    var staffLabelArr = [];
+    if (item.staff) staffLabelArr.push(item.staff);
+    else staffLabelArr.push('Staff');
+    if (item.duty) staffLabelArr.push(item.duty);
+    if (orgLabel) staffLabelArr.push(orgLabel);
+    var staffLabel = staffLabelArr.join(' · ');
 
-/* ---------- Reset ---------- */
-function clearSheet_(name) {
-  const sh = sheet_(name), n = sh.getLastRow() - 1;
-  if (n > 0) sh.getRange(2, 1, n, TABS[name].length).clearContent();
+    sSh.appendRow([
+      newId, item.name, item.category || 'General',
+      Number(item.qty || 0), item.unit || 'ชิ้น', Number(item.minAlert || 5),
+      ts, staffLabel
+    ]);
+    return { ok: true, all: getAllData() };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function clearPatientsData() {
-  return locked_(() => {
-    ['Patients', 'Timeline'].forEach(clearSheet_);
-    return { ok: true, all: getAllData() };
-  });
+  var sheets = ensureSheetsStructure_();
+  var pSh = sheets.pSh, tSh = sheets.tSh, stSh = sheets.stSh;
+  if (pSh.getLastRow() > 1) pSh.deleteRows(2, pSh.getLastRow() - 1);
+  if (tSh.getLastRow() > 1) tSh.deleteRows(2, tSh.getLastRow() - 1);
+  if (stSh.getLastRow() > 1) stSh.deleteRows(2, stSh.getLastRow() - 1);
+  return { ok: true, all: getAllData() };
 }
 
 function resetStockData() {
-  return locked_(() => {
-    clearSheet_('Stock');
-    const ts = now_();
-    sheet_('Stock').getRange(2, 1, DEFAULT_STOCK.length, 8).setValues(DEFAULT_STOCK.map(s => [...s, ts, 'System']));
-    return { ok: true, all: getAllData() };
-  });
+  var sheets = ensureSheetsStructure_();
+  var sSh = sheets.sSh;
+  if (sSh.getLastRow() > 1) sSh.deleteRows(2, sSh.getLastRow() - 1);
+  var ts = nowThai();
+  for (var i = 0; i < DEFAULT_STOCK.length; i++) {
+    var item = DEFAULT_STOCK[i];
+    sSh.appendRow([item[0], item[1], item[2], item[3], item[4], item[5], ts, item[6]]);
+  }
+  return { ok: true, all: getAllData() };
 }
