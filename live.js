@@ -8,7 +8,7 @@ export function observeUpdates({ refresh, status }) {
     if (!active) return;
     pending.set([change.resource, change.incidentId].join(':'), change);
     clearTimeout(timer);
-    timer = setTimeout(flush, 120);
+    timer = setTimeout(flush, 150);
   }
 
   async function flush() {
@@ -20,7 +20,7 @@ export function observeUpdates({ refresh, status }) {
       await refresh(changes);
     } finally {
       busy = false;
-      if (active && pending.size) timer = setTimeout(flush, 120);
+      if (active && pending.size) timer = setTimeout(flush, 150);
     }
   }
 
@@ -33,8 +33,7 @@ export function observeUpdates({ refresh, status }) {
   };
 
   status('periodic');
-  fullRefresh();
-  const interval = setInterval(fullRefresh, 6000);
+  const interval = setInterval(fullRefresh, 15000);
   document.addEventListener('visibilitychange', onVisible);
 
   return {
