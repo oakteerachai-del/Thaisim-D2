@@ -119,6 +119,7 @@ dialog::backdrop{background:rgba(10,20,30,.6)}
     <div class="ribbon" id="ribbon"></div>
     <button class="btn line s" data-act="newpt" style="color:var(--ink)">+ ผู้ป่วยใหม่</button>
     <button class="btn s" data-act="scan" style="background:#fff;color:var(--brand)">📷 สแกน QR</button>
+    <button class="btn line s" id="sync" data-act="reconnect" style="color:var(--ink)"></button>
     <button class="me" id="me" data-act="switchUser" title="เปลี่ยนเจ้าหน้าที่"></button>
     <button class="btn line s" data-act="refresh" aria-label="รีเฟรชข้อมูล">↻</button>
   </header>
@@ -201,6 +202,12 @@ dialog::backdrop{background:rgba(10,20,30,.6)}
     <h2 style="margin-top:16px">ประวัติย้อนหลัง</h2><div id="mLog" class="mute">ยังไม่มีประวัติ</div>
   </div>
 </dialog>
+<dialog id="cfmDlg" style="width:min(420px,94vw)">
+  <div class="db">
+    <div id="cfmMsg" style="white-space:pre-line;font-weight:600;margin-bottom:16px"></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn line" id="cfmNo" data-act="cfmNo" style="color:var(--ink)">ยกเลิก</button><button class="btn bad" id="cfmYes" data-act="cfmYes">ยืนยัน</button></div>
+  </div>
+</dialog>
 <dialog id="scanDlg">
   <div class="dh"><b>สแกน QR การ์ดผู้ป่วย</b><button class="btn line s" data-act="closeScan">ปิด</button></div>
   <div class="db">
@@ -217,14 +224,15 @@ dialog::backdrop{background:rgba(10,20,30,.6)}
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 // Filled in by Apps Script; stays harmless (empty) if the file is opened outside Apps Script
 /* ===== ตั้งค่า 2 บรรทัดนี้ก่อนใช้งาน ===== */
 const CFG = {
   CLIENT_ID: '',   // OAuth Client ID จาก Google Cloud Console (ลงท้าย .apps.googleusercontent.com) — เว้นว่าง = โหมดทดลอง
-  SHEET_ID: '10YRiiAJrXIiCCYDQYmnv6cl01fPEyCIpUphBvIhNgIE'
+  SHEET_ID: '10YRiiAJrXIiCCYDQYmnv6cl01fPEyCIpUphBvIhNgIE',
+  POLL_SEC: 5      // ดึงข้อมูลใหม่ทุกกี่วินาที (5 เหมาะกับไม่เกิน ~25 เครื่องพร้อมกัน; ถ้าใช้มากกว่านี้ให้ปรับเป็น 10-15)
 };
 /* ===================================== */
 var WEB_APP_URL = location.href.split(/[?#]/)[0];   // ลิงก์ของหน้านี้ ใช้ฝังใน QR
@@ -359,7 +367,13 @@ const SH = {
       : r.status === 404 ? 'ไม่พบ Google Sheet — ตรวจ SHEET_ID' : m || 'HTTP ' + r.status);
   },
   async get(range) { return (await this.api('/values/' + encodeURIComponent(range) + '?valueRenderOption=FORMATTED_VALUE')).values || []; },
-  async rows(n) { const w = this.T[n].length; return (await this.get(n + '!A2:' + String.fromCharCode(64 + w))).map(r => Array.from({length: w}, (_, i) => r[i] == null ? '' : String(r[i]))); },
+  pad(n, vals) { const w = this.T[n].length; return (vals || []).map(r => Array.from({length: w}, (_, i) => r[i] == null ? '' : String(r[i]))); },
+  async rows(n) { return this.pad(n, await this.get(n + '!A2:' + String.fromCharCode(64 + this.T[n].length))); },
+  async multi(names) { // อ่านหลายแท็บในคำขอเดียว ประหยัดโควตา Sheets API
+    const q = names.map(n => 'ranges=' + encodeURIComponent(n + '!A2:' + String.fromCharCode(64 + this.T[n].length))).join('&');
+    const r = await this.api('/values:batchGet?valueRenderOption=FORMATTED_VALUE&' + q);
+    return names.map((n, i) => this.pad(n, (r.valueRanges[i] || {}).values));
+  },
   put(range, vals) { return this.api('/values/' + encodeURIComponent(range) + '?valueInputOption=RAW', {method: 'PUT', body: JSON.stringify({values: vals})}); },
   append(n, vals) { return this.api('/values/' + encodeURIComponent(n + '!A1') + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS', {method: 'POST', body: JSON.stringify({values: vals})}); },
 
@@ -381,7 +395,7 @@ const SH = {
   },
 
   async getAllData() {
-    const [P, S, F] = await Promise.all([this.rows('Patients'), this.rows('Stock'), this.rows('Staff')]);
+    const [P, S, F] = await this.multi(['Patients', 'Stock', 'Staff']);
     const seen = {}, staff = [];
     F.forEach(r => { const code = r[1].trim(), key = (r[4] || code).trim().toLowerCase(); if (!key || seen[key]) return; seen[key] = 1; staff.push({code, name: r[5], duty: r[2], org: r[3], zone: r[6], time: r[0]}); });
     return {ok: true, patients: P.filter(r => r[0]).map(r => this.obj(this.PK, r)),
@@ -390,7 +404,7 @@ const SH = {
   },
   async getPatientData(pid) {
     const id = String(pid).trim().toUpperCase();
-    const [P, L] = await Promise.all([this.rows('Patients'), this.rows('Timeline')]);
+    const [P, L] = await this.multi(['Patients', 'Timeline']);
     const row = P.find(r => this.same(r[0], id));
     return {ok: true, patient: row ? this.obj(this.PK, row) : null, logs: L.filter(r => this.same(r[1], id)).reverse().map(r => this.obj(this.TK, r))};
   },
@@ -399,7 +413,9 @@ const SH = {
     if (!id) return {ok: false, error: 'กรุณากรอกรหัสผู้ป่วย'};
     const ts = nowStr(), w = API.who(d), g = k => String(d[k] == null ? '' : d[k]).trim();
     const row = [id, g('color'), g('zone'), g('triagePoint'), g('deconStatus'), g('demo'), g('cc'), g('rr'), g('hr'), g('bp'), g('spo2'), g('gcs'), g('interventions'), g('transport'), w.label, g('duty'), w.org, ts];
-    const at = (await this.rows('Patients')).findIndex(r => this.same(r[0], id));
+    const R = await this.rows('Patients'), at = R.findIndex(r => this.same(r[0], id));
+    if (at > -1 && !d.force && d.base != null && String(d.base) !== R[at][17])
+      return {ok: false, conflict: true, error: 'ผู้ป่วยรายนี้เพิ่งถูกแก้ไขโดย ' + R[at][14] + ' เมื่อ ' + R[at][17]};
     if (at > -1) await this.put('Patients!A' + (at + 2) + ':R' + (at + 2), [row]); else await this.append('Patients', [row]);
     await this.append('Timeline', [[ts, id, g('color'), g('zone'), g('triagePoint'), g('deconStatus'), g('rr'), g('hr'), g('bp'), g('spo2'), g('gcs'), g('note'), w.label, g('duty'), w.org]]);
     return {ok: true, id, all: await this.getAllData()};
@@ -435,6 +451,8 @@ const SH = {
   },
   async clearPatientsData() {
     await this.api('/values:batchClear', {method: 'POST', body: JSON.stringify({ranges: ['Patients!A2:R', 'Timeline!A2:O']})});
+    const left = (await this.multi(['Patients', 'Timeline'])).map(t => t.filter(r => r.some(c => c !== '')).length);
+    if (left[0] || left[1]) throw new Error('ล้างไม่หมด (เหลือผู้ป่วย ' + left[0] + ' แถว, ประวัติ ' + left[1] + ' แถว) — ตรวจว่าแท็บ Patients/Timeline ไม่มีช่วงที่ถูกป้องกัน (Protected range) และบัญชีนี้เป็น Editor');
     return {ok: true, all: await this.getAllData()};
   },
   async resetStockData() {
@@ -457,7 +475,7 @@ const lsGet = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d;
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
 
 /* ---------- state ---------- */
-let S = {patients: [], stock: [], staff: []}, me = null, color = '';
+let S = {patients: [], stock: [], staff: []}, me = null, color = '', baseUpd = '';
 try { me = JSON.parse(sessionStorage.getItem('tsm_me') || 'null'); } catch (e) {}
 if (me && !me.name) me.name = me.code;
 const ctx = () => ({staff: me.name + ' (' + me.code + ')', org: me.org, duty: me.duty, opZone: me.zone});
@@ -513,9 +531,28 @@ function showLogin() {
 }
 
 /* ---------- data ---------- */
+let pollErr = 0, pollT = 0, lastJ = '', wEpoch = 0;
+function applyAll(all) { wEpoch++; S = all; lastJ = JSON.stringify(all); render(); setSync('ok'); } // ผลจากการบันทึก/ล้างของเราเอง ใหม่กว่าผลดึงข้อมูลที่ค้างอยู่
+function setSync(st) {
+  const b = $('sync'); if (!b || DEMO) return;
+  b.textContent = st === 'ok' ? '🟢 ซิงค์ ' + nowStr().slice(11) : st === 'expired' ? '🟠 แตะเพื่อเชื่อมต่อ Google ใหม่' : '🔴 เชื่อมต่อไม่ได้ — กำลังลองใหม่';
+  b.title = st === 'ok' ? 'ข้อมูลอัปเดตอัตโนมัติทุก ' + (CFG.POLL_SEC || 5) + ' วินาที (แตะเพื่อรีเฟรชทันที)' : '';
+}
 async function refresh(quiet) {
-  try { const r = await gas('getAllData'); if (r && r.ok) { S = r; render(); } }
-  catch (e) { if (!quiet) toast('โหลดข้อมูลไม่สำเร็จ: ' + e.message, 'bad'); }
+  try {
+    const ep = wEpoch, r = await gas('getAllData');
+    if (ep !== wEpoch) return;
+    if (r && r.ok) { const j = JSON.stringify(r); if (j !== lastJ) { lastJ = j; S = r; render(); } pollErr = 0; setSync('ok'); }
+  } catch (e) { pollErr++; setSync('err'); if (!quiet) toast('โหลดข้อมูลไม่สำเร็จ: ' + e.message, 'bad'); }
+}
+async function pollOnce() {
+  if (!me || document.hidden || $('dlg').open || $('scanDlg').open) return;
+  if (!DEMO && !SH.valid()) return setSync('expired');
+  await refresh(true);
+}
+function pollLoop() { // ลองใหม่ช้าลงเรื่อย ๆ ถ้าเชื่อมต่อไม่ได้ (สูงสุด 6 เท่า)
+  clearTimeout(pollT);
+  pollT = setTimeout(async () => { await pollOnce(); pollLoop(); }, (CFG.POLL_SEC || 5) * 1000 * Math.min(6, 1 + pollErr));
 }
 function render() { ribbon(); overview(); patients(); stock(); }
 
@@ -529,7 +566,7 @@ function overview() {
   const decon = P.filter(p => /รอ|กำลัง/.test(p.deconStatus || '')).length;
   const done = P.filter(p => zi(p) === 5 || zi(p) === 6).length;
   const low = S.stock.filter(s => s.qty <= s.minAlert).length;
-  $('sub').textContent = 'เจ้าหน้าที่ที่ลงทะเบียน ' + (S.staffCount || 0) + ' คน · อัปเดตอัตโนมัติทุก 20 วินาที';
+  $('sub').textContent = 'เจ้าหน้าที่ที่ลงทะเบียน ' + (S.staffCount || 0) + ' คน · อัปเดตอัตโนมัติทุก ' + (CFG.POLL_SEC || 5) + ' วินาที';
   $('stats').innerHTML = [['ผู้ป่วยทั้งหมด', n, ''], ['ยังอยู่ในพื้นที่', active, 'var(--brand)'], ['รอ / กำลังล้างสารเคมี', decon, 'var(--p)'], ['ส่งต่อ / จำหน่ายแล้ว', done, 'var(--g)'], ['เวชภัณฑ์ใกล้หมด', low, low ? 'var(--r)' : '']]
     .map(s => `<div class="stat"><span class="mute">${s[0]}</span><b style="color:${s[2]}">${s[1]}</b></div>`).join('');
   $('zones').innerHTML = ZONES.map((z, i) => {
@@ -563,12 +600,21 @@ async function addStock() {
   const name = $('sName').value.trim(); if (!name) return toast('กรอกชื่อรายการ', 'bad');
   try {
     const r = await gas('addStockItem', {name, category: $('sCat').value, qty: +$('sQty').value || 0, unit: $('sUnit').value.trim() || 'ชิ้น', minAlert: +$('sMin').value || 0, ...ctx()});
-    if (r.ok) { S = r.all; render(); $('sName').value = ''; toast('เพิ่ม “' + name + '” แล้ว', 'ok'); } else toast(r.error || 'เพิ่มไม่สำเร็จ', 'bad');
+    if (r.ok) { applyAll(r.all); $('sName').value = ''; toast('เพิ่ม “' + name + '” แล้ว', 'ok'); } else toast(r.error || 'เพิ่มไม่สำเร็จ', 'bad');
   } catch (e) { toast('เพิ่มไม่สำเร็จ: ' + e.message, 'bad'); }
 }
+let cfmRes = null;
+function askConfirm(msg, yes, no) { // กล่องยืนยันในหน้าเว็บเอง (confirm() ของเบราว์เซอร์ถูกบล็อกในแอปอย่าง LINE/Facebook)
+  return new Promise(ok => {
+    if (cfmRes) cfmClose(false);
+    $('cfmMsg').textContent = msg; $('cfmYes').textContent = yes || 'ยืนยัน'; $('cfmNo').textContent = no || 'ยกเลิก';
+    cfmRes = ok; if (!$('cfmDlg').open) $('cfmDlg').showModal();
+  });
+}
+function cfmClose(v) { const r = cfmRes; cfmRes = null; if ($('cfmDlg').open) $('cfmDlg').close(); if (r) r(v); }
 async function danger(fn, msg1, msg2, done) {
-  if (!confirm(msg1) || (msg2 && !confirm(msg2))) return;
-  try { const r = await gas(fn); if (r.ok) { S = r.all; render(); toast(done, 'ok'); } else toast('ดำเนินการไม่สำเร็จ', 'bad'); }
+  if (!(await askConfirm(msg1, 'ดำเนินการต่อ')) || (msg2 && !(await askConfirm(msg2, 'ยืนยันล้างข้อมูล')))) return;
+  try { const r = await gas(fn); if (r.ok) { applyAll(r.all); toast(done, 'ok'); } else toast('ดำเนินการไม่สำเร็จ', 'bad'); }
   catch (e) { toast('ดำเนินการไม่สำเร็จ: ' + e.message, 'bad'); }
 }
 
@@ -589,7 +635,8 @@ function qrSvg(text, alt) {
     return `<img alt="${h(alt)}" width="108" height="108" src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(text)}">`;
   }
 }
-function mkcards() {
+async function mkcards() {
+  if (!window.qrcode) await loadLib(QR_URLS, () => !!window.qrcode);
   const n = Math.min(500, Math.max(1, parseInt($('cN').value) || 150)), base = WEB_APP_URL || location.href.split('?')[0];
   $('qrBase').textContent = 'QR จะลิงก์ไปที่: ' + base + '?id=…' + (/^https?:/.test(base) ? '' : ' ⚠️ เปิดจากไฟล์ในเครื่อง QR จะใช้ไม่ได้ — ต้องเปิดผ่านเว็บที่โฮสต์ (https://)');
   let out = '';
@@ -616,6 +663,7 @@ async function loadPt() {
   catch (e) { toast('โหลดไม่สำเร็จ: ' + e.message, 'bad'); }
 }
 function fillForm(p, logs) {
+  baseUpd = (p && p.updated) || '';
   const set = (id, v) => $(id).value = v || '';
   pick(p ? (TRI.find(t => t.k === ck(p.color)) || {}).v || '' : '');
   $('mZone').value = (p && p.zone) || ZONES[0].k; $('mTp').value = (p && p.triagePoint) || 'Primary Triage'; $('mDecon').value = (p && p.deconStatus) || DECON[0];
@@ -626,22 +674,46 @@ function fillForm(p, logs) {
   $('mMeta').textContent = p ? 'อัปเดตล่าสุด ' + p.updated + ' โดย ' + p.staff : 'ผู้ป่วยใหม่';
   $('mLog').innerHTML = logs.length ? logs.map(l => `<div class="log"><b>${h(l.time)}</b> · ${h(l.staff)}<br>${badge(l.color)} ${h(l.zone)} (${h(l.triagePoint)})<br>${vs(l)}${l.note ? '<br>บันทึก: ' + h(l.note) : ''}</div>`).join('') : 'ยังไม่มีประวัติ';
 }
-async function save() {
+async function save(force) {
   const id = $('mId').value.trim().toUpperCase();
   if (!id) return toast('กรอกรหัสผู้ป่วย', 'bad');
   if (!color) return toast('เลือกสี Triage ก่อนบันทึก', 'bad');
   const b = $('saveBtn'); b.disabled = true; b.textContent = 'กำลังบันทึก…';
   const v = k => $(k).value.trim();
+  let again = false;
   try {
     const r = await gas('savePatient', {id, color, zone: v('mZone'), triagePoint: v('mTp'), deconStatus: v('mDecon'), demo: v('mDemo'), cc: v('mCC'), rr: v('mRR'), hr: v('mHR'), bp: v('mBP'), spo2: v('mSpO2'), gcs: v('mGCS'),
-      interventions: [...document.querySelectorAll('#chips .chip.on')].map(c => c.textContent).join(', '), transport: v('mTrans'), note: v('mNote'), ...ctx()});
-    if (r.ok) { S = r.all; render(); $('dlg').close(); toast('บันทึก ' + id + ' แล้ว', 'ok'); } else toast(r.error || 'บันทึกไม่สำเร็จ', 'bad');
+      interventions: [...document.querySelectorAll('#chips .chip.on')].map(c => c.textContent).join(', '), transport: v('mTrans'), note: v('mNote'), base: baseUpd, force: force === true, ...ctx()});
+    if (r.ok) { applyAll(r.all); $('dlg').close(); toast('บันทึก ' + id + ' แล้ว', 'ok'); }
+    else if (r.conflict) {
+      if (await askConfirm(r.error + '\n\nบันทึกทับข้อมูลของเขา หรือโหลดข้อมูลล่าสุดมาดูก่อน? (ถ้าโหลดใหม่ สิ่งที่พิมพ์ไว้จะหาย)', 'บันทึกทับ', 'โหลดข้อมูลล่าสุด')) again = true;
+      else loadPt();
+    } else toast(r.error || 'บันทึกไม่สำเร็จ', 'bad');
   } catch (e) { toast('บันทึกไม่สำเร็จ: ' + e.message, 'bad'); }
   b.disabled = false; b.textContent = 'บันทึกข้อมูลผู้ป่วย';
+  if (again) return save(true);
 }
 
 /* ---------- QR scanner ---------- */
-const scan = {stream: null, t: 0, det: null, bdOff: false, cv: null, last: ''};
+const scan = {stream: null, t: 0, det: null, bdOff: false, cv: null, last: '', lib: null};
+const JSQR_URLS = ['https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js', 'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js', 'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'];
+const QR_URLS = ['https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js', 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js', 'https://unpkg.com/qrcode-generator@1.4.4/qrcode.js'];
+function loadLib(urls, test) { // ลองโหลดไลบรารีจากหลายแหล่งตามลำดับ จนกว่าจะใช้ได้
+  return new Promise(ok => {
+    const next = i => {
+      if (test()) return ok(true);
+      if (i >= urls.length) return ok(false);
+      const sc = document.createElement('script'); sc.src = urls[i];
+      sc.onload = sc.onerror = () => next(i + 1);
+      document.head.appendChild(sc);
+    };
+    next(0);
+  });
+}
+function ensureDecoder() { // true = มีตัวอ่าน QR พร้อมใช้ (BarcodeDetector ของเบราว์เซอร์ หรือ jsQR)
+  if (window.jsQR || ('BarcodeDetector' in window && !scan.bdOff)) return Promise.resolve(true);
+  return scan.lib || (scan.lib = loadLib(JSQR_URLS, () => !!window.jsQR));
+}
 function parseId(t) {
   t = String(t || '').trim();
   let m = t.match(/[?&]id=([A-Za-z0-9_-]+)/i); if (m) return m[1].toUpperCase();
@@ -687,9 +759,15 @@ async function openScan() {
   if (!$('scanDlg').open) $('scanDlg').showModal();
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('unsupported');
-    scan.stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}}, audio: false});
+    const lib = ensureDecoder();
+    scan.stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}, width: {ideal: 1280}, height: {ideal: 720}}, audio: false});
+    try { // โฟกัสอัตโนมัติต่อเนื่อง (ถ้าเครื่องรองรับ) ช่วยให้อ่าน QR ติดง่ายขึ้นมาก
+      const tr = scan.stream.getVideoTracks()[0], cap = tr.getCapabilities ? tr.getCapabilities() : {};
+      if (cap.focusMode && cap.focusMode.includes('continuous')) tr.applyConstraints({advanced: [{focusMode: 'continuous'}]}).catch(() => {});
+    } catch (e) {}
     const v = $('scanVid'); v.srcObject = scan.stream; await v.play();
-    $('scanMsg').textContent = 'เล็งกล้องไปที่ QR บนการ์ดผู้ป่วย';
+    if (!(await lib)) { $('scanMsg').textContent = 'โหลดตัวอ่าน QR ไม่สำเร็จ (อินเทอร์เน็ต/ถูกบล็อก) — รีเฟรชหน้า หรือใช้ปุ่มพิมพ์รหัสด้านล่าง'; return; }
+    $('scanMsg').textContent = 'เล็งกล้องไปที่ QR ให้เห็นทั้งอัน ถือนิ่ง ๆ ห่างประมาณ 15–25 ซม.';
     tick();
   } catch (e) {
     stopScan();
@@ -701,6 +779,7 @@ async function openScan() {
 async function scanFromFile(file) {
   if (!file) return;
   $('scanMsg').textContent = 'กำลังอ่าน QR จากรูป…';
+  if (!(await ensureDecoder())) { $('scanMsg').textContent = 'โหลดตัวอ่าน QR ไม่สำเร็จ — รีเฟรชหน้าแล้วลองใหม่'; $('scanFile').value = ''; return; }
   const url = URL.createObjectURL(file), img = new Image();
   try {
     await new Promise((ok, no) => { img.onload = ok; img.onerror = no; img.src = url; });
@@ -726,7 +805,8 @@ function go(v) {
 function toPatients(f) { ['fColor', 'fZone', 'fTp', 'qSearch'].forEach(id => $(id).value = ''); Object.keys(f).forEach(k => $(k).value = f[k]); patients(); go('patients'); }
 const ACT = {
   tab, login, register, cancelLogin: enter, switchUser: showLogin,
-  refresh: () => { refresh(); toast('กำลังรีเฟรช…'); }, go, newpt: () => openPt(''), open: openPt, closeDlg: () => $('dlg').close(), save, pick,
+  refresh: () => { refresh(); toast('กำลังรีเฟรช…'); }, go, newpt: () => openPt(''), open: openPt, cfmYes: () => cfmClose(true), cfmNo: () => cfmClose(false),
+  closeDlg: () => { $('dlg').close(); refresh(true); }, reconnect: () => refresh(), save, pick,
   scan: openScan, closeScan: () => { stopScan(); $('scanDlg').close(); }, scanManual,
   chip: (v, el) => el.classList.toggle('on'), adj, addStock, mkcards, print: () => window.print(),
   color: v => toPatients({fColor: v}), zone: v => toPatients({fZone: v}),
@@ -750,11 +830,13 @@ $('nav').innerHTML = NAV.map(n => `<button class="n${n[0] === 'overview' ? ' on'
 $('ergQ').addEventListener('input', erg);
 $('mId').addEventListener('change', loadPt);
 $('scanDlg').addEventListener('close', stopScan);
+$('cfmDlg').addEventListener('close', () => { if (cfmRes) cfmClose(false); });
 $('scanFile').addEventListener('change', e => scanFromFile(e.target.files[0]));
 $('scanId').addEventListener('keydown', e => { if (e.key === 'Enter') scanManual(); });
 $('lCode').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
-setInterval(() => { if (me && !document.hidden && !$('dlg').open && (DEMO || SH.valid())) refresh(true); }, 20000);
-if (!DEMO) $('gHint').classList.remove('hide');
+pollLoop();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollOnce(); });
+if (!DEMO) $('gHint').classList.remove('hide'); else $('sync').classList.add('hide');
 if (DEMO) { $('demoNote').classList.remove('hide'); document.querySelector('.logo small').textContent = 'โหมดทดลอง · ข้อมูลอยู่ในเครื่องนี้เท่านั้น'; }
 erg();
 if (me && DEMO) enter(); else showLogin(); // โหมด Sheets ต้องกดเชื่อมต่อ Google ก่อน จึงเริ่มที่หน้า login เสมอ
